@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_SETTINGS, applyPreset, calculatePracticeResult, formatDuration,
   sanitizeSettings, scriptFingerprint, scrollPixelsPerSecond,
-  shouldOfferResume, speakingSeconds,
+  shouldOfferResume, speakingSeconds, speedBounds, toggleExtremeSpeed,
 } from "./core";
 
 describe("teleprompter core", () => {
@@ -40,5 +40,25 @@ describe("teleprompter core", () => {
   it("fingerprints identical drafts consistently", () => {
     expect(scriptFingerprint("Title", "Hello world", null)).toBe(scriptFingerprint("Title", "Hello world", null));
     expect(scriptFingerprint("Title", "Hello world", null)).not.toBe(scriptFingerprint("Title", "Changed", null));
+  });
+
+  it("keeps normal speeds capped at 1-10 unless extreme range is on", () => {
+    expect(sanitizeSettings({ speed: 99 }).speed).toBe(10);
+    expect(sanitizeSettings({ speed: 99, extremeSpeed: true }).speed).toBe(25);
+    expect(sanitizeSettings({ speed: 0.05, extremeSpeed: true }).speed).toBe(0.2);
+  });
+
+  it("clamps speed back into range when extreme mode is turned off", () => {
+    const extreme = { ...DEFAULT_SETTINGS, extremeSpeed: true, speed: 20 };
+    expect(toggleExtremeSpeed(extreme, false).speed).toBe(speedBounds(false).max);
+    expect(toggleExtremeSpeed(DEFAULT_SETTINGS, true).speed).toBe(DEFAULT_SETTINGS.speed);
+  });
+
+  it("scrolls far faster and far slower once the extreme range is unlocked", () => {
+    const normalFastest = scrollPixelsPerSecond(speedBounds(false).max, 200);
+    const extremeFastest = scrollPixelsPerSecond(speedBounds(true).max, 200);
+    const extremeSlowest = scrollPixelsPerSecond(speedBounds(true).min, 80);
+    expect(extremeFastest).toBeGreaterThan(normalFastest);
+    expect(extremeSlowest).toBeLessThan(scrollPixelsPerSecond(speedBounds(false).min, 80));
   });
 });

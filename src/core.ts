@@ -18,6 +18,7 @@ export type Settings = {
   hideMarkers: boolean;
   flipHorizontal: boolean;
   flipVertical: boolean;
+  extremeSpeed: boolean;
 };
 
 export type Preset = {
@@ -53,6 +54,7 @@ export const DEFAULT_SETTINGS: Settings = {
   hideMarkers: false,
   flipHorizontal: false,
   flipVertical: false,
+  extremeSpeed: false,
 };
 
 export const PRESETS: Preset[] = [
@@ -89,6 +91,18 @@ export const PRESETS: Preset[] = [
 export const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 export const clampProgress = (value: number) => clamp(Number.isFinite(value) ? value : 0, 0, 1);
 
+const NORMAL_SPEED_RANGE = { min: 1, max: 10 };
+const EXTREME_SPEED_RANGE = { min: 0.2, max: 25 };
+
+export function speedBounds(extreme: boolean) {
+  return extreme ? EXTREME_SPEED_RANGE : NORMAL_SPEED_RANGE;
+}
+
+export function toggleExtremeSpeed(settings: Settings, enabled: boolean): Settings {
+  const bounds = speedBounds(enabled);
+  return { ...settings, extremeSpeed: enabled, speed: clamp(settings.speed, bounds.min, bounds.max) };
+}
+
 export function wordCount(text: string) {
   return text.trim() ? text.trim().split(/\s+/).length : 0;
 }
@@ -99,7 +113,7 @@ export function speakingSeconds(words: number, wpm: number) {
 }
 
 export function scrollPixelsPerSecond(speed: number, wpm: number) {
-  const base = 10 + clamp(speed, 1, 10) * 7.5;
+  const base = 10 + clamp(speed, EXTREME_SPEED_RANGE.min, EXTREME_SPEED_RANGE.max) * 7.5;
   return base * (clamp(wpm, 80, 200) / 130);
 }
 
@@ -140,10 +154,12 @@ export function sanitizeSettings(input: unknown): Settings {
   const countdown = [0, 3, 5, 10].includes(Number(value.countdown)) ? Number(value.countdown) as 0 | 3 | 5 | 10 : DEFAULT_SETTINGS.countdown;
   const alignment = ["left", "center", "right"].includes(String(value.alignment)) ? value.alignment as Alignment : DEFAULT_SETTINGS.alignment;
   const theme = ["dark", "light", "custom"].includes(String(value.theme)) ? value.theme as Theme : DEFAULT_SETTINGS.theme;
+  const extremeSpeed = typeof value.extremeSpeed === "boolean" ? value.extremeSpeed : DEFAULT_SETTINGS.extremeSpeed;
+  const speedRange = speedBounds(extremeSpeed);
   return {
     ...DEFAULT_SETTINGS,
     ...value,
-    speed: clamp(Number(value.speed ?? DEFAULT_SETTINGS.speed), 1, 10),
+    speed: clamp(Number(value.speed ?? DEFAULT_SETTINGS.speed), speedRange.min, speedRange.max),
     wpm: clamp(Number(value.wpm ?? DEFAULT_SETTINGS.wpm), 80, 200),
     fontSize: clamp(Number(value.fontSize ?? DEFAULT_SETTINGS.fontSize), 28, 120),
     lineSpacing: clamp(Number(value.lineSpacing ?? DEFAULT_SETTINGS.lineSpacing), 1.1, 2.2),
@@ -153,6 +169,7 @@ export function sanitizeSettings(input: unknown): Settings {
     alignment,
     countdown,
     theme,
+    extremeSpeed,
     backgroundColor: /^#[0-9a-f]{6}$/i.test(String(value.backgroundColor)) ? String(value.backgroundColor) : DEFAULT_SETTINGS.backgroundColor,
     textColor: /^#[0-9a-f]{6}$/i.test(String(value.textColor)) ? String(value.textColor) : DEFAULT_SETTINGS.textColor,
     focusGuide: typeof value.focusGuide === "boolean" ? value.focusGuide : DEFAULT_SETTINGS.focusGuide,
