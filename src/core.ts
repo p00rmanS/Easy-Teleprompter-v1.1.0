@@ -92,10 +92,14 @@ export const clamp = (value: number, min: number, max: number) => Math.min(max, 
 export const clampProgress = (value: number) => clamp(Number.isFinite(value) ? value : 0, 0, 1);
 
 const NORMAL_SPEED_RANGE = { min: 1, max: 10 };
-const EXTREME_SPEED_RANGE = { min: 0.2, max: 25 };
+const EXTREME_SPEED_RANGE = { min: 0.2, max: 60 };
 
 export function speedBounds(extreme: boolean) {
   return extreme ? EXTREME_SPEED_RANGE : NORMAL_SPEED_RANGE;
+}
+
+export function speedStep(extreme: boolean) {
+  return extreme ? 2 : 0.5;
 }
 
 export function toggleExtremeSpeed(settings: Settings, enabled: boolean): Settings {
@@ -112,9 +116,11 @@ export function speakingSeconds(words: number, wpm: number) {
   return Math.max(1, Math.round((words / clamp(wpm, 60, 220)) * 60));
 }
 
-export function scrollPixelsPerSecond(speed: number, wpm: number) {
-  const base = 10 + clamp(speed, EXTREME_SPEED_RANGE.min, EXTREME_SPEED_RANGE.max) * 7.5;
-  return base * (clamp(wpm, 80, 200) / 130);
+// Scroll rate is driven purely by the speed control. It intentionally ignores WPM
+// (Speaking pace) so operators can crank scroll speed without it being throttled by
+// a reading-pace estimate that varies per presenter.
+export function scrollPixelsPerSecond(speed: number) {
+  return 10 + clamp(speed, EXTREME_SPEED_RANGE.min, EXTREME_SPEED_RANGE.max) * 7.5;
 }
 
 export function formatDuration(milliseconds: number) {
