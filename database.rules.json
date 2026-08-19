@@ -1,0 +1,49 @@
+{
+  "rules": {
+    "v1": {
+      "users": {
+        "$uid": {
+          ".read": "auth != null && auth.uid === $uid",
+          ".write": false
+        }
+      },
+      "venues": {
+        ".read": "auth != null",
+        ".write": false
+      },
+      "employees": {
+        ".read": "auth != null",
+        ".write": false
+      },
+      "roleDefinitions": {
+        ".read": "auth != null",
+        ".write": false
+      },
+      "organization": {
+        ".read": "auth != null",
+        ".write": false
+      },
+      "practiceResults": {
+        "$venueId": {
+          ".read": "auth != null && (root.child('v1/users/'+auth.uid+'/role').val() === 'admin' || root.child('v1/users/'+auth.uid+'/venueId').val() === $venueId)",
+          "$resultId": {
+            ".write": "auth != null && !data.exists() && root.child('v1/users/'+auth.uid+'/venueId').val() === $venueId && newData.child('uid').val() === auth.uid && newData.child('venueId').val() === $venueId",
+            ".validate": "newData.hasChildren(['uid', 'employeeId', 'venueId', 'elapsedMs', 'words', 'averageWpm', 'pauses', 'completedAt'])"
+          }
+        }
+      },
+      "scripts": {
+        "$venueId": {
+          ".read": "auth != null && root.child('v1/users/'+auth.uid+'/venueId').val() === $venueId",
+          ".write": "auth != null && root.child('v1/users/'+auth.uid+'/venueId').val() === $venueId && (root.child('v1/users/'+auth.uid+'/role').val() === 'manager' || root.child('v1/users/'+auth.uid+'/role').val() === 'admin')"
+        }
+      },
+      "activity": {
+        "$venueId": {
+          ".read": "auth != null && root.child('v1/users/'+auth.uid+'/venueId').val() === $venueId",
+          ".write": "auth != null && root.child('v1/users/'+auth.uid+'/venueId').val() === $venueId"
+        }
+      }
+    }
+  }
+}

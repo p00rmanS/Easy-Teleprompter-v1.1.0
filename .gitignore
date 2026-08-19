@@ -4,3 +4,5 @@ dist/
 .npm-cache/
 *.log
 *.tsbuildinfo
+.env.local
+.env*.local

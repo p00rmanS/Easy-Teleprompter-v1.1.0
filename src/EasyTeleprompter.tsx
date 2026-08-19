@@ -33,6 +33,13 @@ import {
   type Settings,
   type Theme,
 } from "./core";
+import { Modal } from "./components/Modal";
+import { SignInModal } from "./components/SignInModal";
+import { AnalyticsModal } from "./components/AnalyticsModal";
+import { useAuth } from "./auth/AuthContext";
+import { syncPracticeResult } from "./services/practiceSync";
+
+export { Modal };
 
 type Script = { id: string; title: string; content: string; createdAt: number; modifiedAt: number };
 type SavedPosition = { fingerprint: string; progress: number; updatedAt: number };
@@ -90,15 +97,6 @@ function pace(speed: number) {
 
 function Icon({ symbol, children }: { symbol: string; children: ReactNode }) {
   return <span className="icon-label"><span className="button-icon" aria-hidden="true">{symbol}</span><span>{children}</span></span>;
-}
-function Modal({ title, onClose, children, wide = false }: { title: string; onClose(): void; children: ReactNode; wide?: boolean }) {
-  useEffect(() => { const fn = (event: KeyboardEvent) => event.key === "Escape" && onClose(); window.addEventListener("keydown", fn); return () => window.removeEventListener("keydown", fn); }, [onClose]);
-  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-    <section className={`modal-card ${wide ? "modal-wide" : ""}`} role="dialog" aria-modal="true" aria-labelledby="dialog-title">
-      <div className="modal-header"><h2 id="dialog-title">{title}</h2><button className="icon-button" onClick={onClose} aria-label="Close dialog">×</button></div>
-      {children}
-    </section>
-  </div>;
 }
 function Range({ label, value, min, max, step = 1, display, onChange }: { label: string; value: number; min: number; max: number; step?: number; display: string; onChange(value: number): void }) {
   return <label className="range-control"><span><span>{label}</span><strong>{display}</strong></span><input type="range" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} /></label>;
@@ -312,6 +310,8 @@ export default function EasyTeleprompter() {
   const [practiceResult, setPracticeResult] = useState<PracticeResult | null>(null), [recentResults, setRecentResults] = useState<PracticeResult[]>([]);
   const [storageWarning, setStorageWarning] = useState<string | null>(null), [storageUsage, setStorageUsage] = useState<string>("Checking…");
   const [updateWorker, setUpdateWorker] = useState<ServiceWorker | null>(null);
+  const [signInOpen, setSignInOpen] = useState(false), [analyticsOpen, setAnalyticsOpen] = useState(false);
+  const { status: authStatus, profile, signOut } = useAuth();
   const confirmAction = useRef<(() => void) | null>(null), fileInput = useRef<HTMLInputElement>(null), scriptEditor = useRef<HTMLTextAreaElement>(null);
   const reloadingForUpdate = useRef(false);
   const notify = useCallback((message: string) => { setToast(message); setTimeout(() => setToast((value) => value === message ? null : value), 2800); }, []);
@@ -416,7 +416,11 @@ export default function EasyTeleprompter() {
   const handleFinish = useCallback((result: PracticeResult) => {
     localStorage.removeItem(STORE.position); setPrompt(false); setPracticeResult(result);
     setRecentResults((current) => { const next = [result, ...current].slice(0, 10); safelySave(STORE.results, next); return next; });
-  }, [safelySave]);
+    if (authStatus === "signed-in" && profile) {
+      syncPracticeResult(result, { venueId: profile.venueId, employeeId: profile.employeeId, employeeName: profile.displayName, uid: profile.uid, scriptId: currentId, scriptTitle: title })
+        .catch(() => notify("Saved locally. Team sync will retry later."));
+    }
+  }, [safelySave, authStatus, profile, currentId, title, notify]);
   const resetSettings = () => ask({ title: "Reset all settings?", message: "Speed, text, colors, margins, and display options will return to their beginner-friendly defaults.", label: "Reset Settings" }, () => { setSettings(DEFAULT_SETTINGS); localStorage.removeItem(STORE.settings); notify("Settings reset."); });
   const clearPosition = () => { localStorage.removeItem(STORE.position); setResumePosition(null); notify("Saved reading position cleared."); };
   const selectPreset = (id: (typeof PRESETS)[number]["id"]) => { setSettings((current) => applyPreset(current, id)); notify("Reading preset applied."); };
@@ -426,7 +430,11 @@ export default function EasyTeleprompter() {
   if (prompt) return <Teleprompter title={title} script={content} settings={settings} setSettings={setSettings} initialProgress={initialProgress} onProgress={handlePromptProgress} onFinish={handleFinish} onExit={() => setPrompt(false)} notify={notify} />;
   return <div className="app-shell">
     {updateWorker && <div className="update-banner" role="status"><span><strong>Easy Teleprompter has an update ready.</strong><small>Your script is already saved.</small></span><button className="button primary" onClick={applyUpdate}>Update Now</button><button className="icon-button" onClick={() => setUpdateWorker(null)} aria-label="Dismiss update">×</button></div>}
-    <header className="site-header"><a href="#top" className="brand"><span className="brand-mark"><i /></span><span><strong>Easy Teleprompter</strong><small>Training video companion</small></span></a><nav><button className="header-button" onClick={() => setTutorial(true)}><Icon symbol="?">Quick Help</Icon></button><button className="header-button accent" onClick={install}><Icon symbol="↓">Install App</Icon></button></nav></header>
+    <header className="site-header"><a href="#top" className="brand"><span className="brand-mark"><i /></span><span><strong>Easy Teleprompter</strong><small>Training video companion</small></span></a><nav><button className="header-button" onClick={() => setTutorial(true)}><Icon symbol="?">Quick Help</Icon></button><button className="header-button accent" onClick={install}><Icon symbol="↓">Install App</Icon></button>{(authStatus === "signed-in" || authStatus === "signed-out") && (authStatus === "signed-in" && profile ? <>
+      <span className="header-user">{profile.displayName}</span>
+      {(profile.role === "manager" || profile.role === "admin") && <button className="header-button" onClick={() => setAnalyticsOpen(true)}><Icon symbol="▤">Analytics</Icon></button>}
+      <button className="header-button" onClick={signOut}><Icon symbol="×">Sign Out</Icon></button>
+    </> : <button className="header-button" onClick={() => setSignInOpen(true)}><Icon symbol="⚿">Sign In</Icon></button>)}</nav></header>
     <main id="top" className="main-content">
       {storageWarning && <div className="storage-alert" role="alert"><span>!</span><p>{storageWarning}</p><button onClick={() => setStorageWarning(null)}>Dismiss</button></div>}
       <section className="hero"><div><span className="eyebrow"><i /> Offline-ready · No account needed</span><h1>Easy Teleprompter</h1><p>Paste your script. Set your speed. Start speaking.</p></div><div className="hero-actions"><button className="button primary large" onClick={start}><Icon symbol="▶">Start Teleprompter</Icon></button><button className="button secondary" onClick={newScript}><Icon symbol="＋">New Script</Icon></button><button className="button secondary" onClick={() => setLibrary(true)}><Icon symbol="▤">Saved Scripts</Icon></button></div></section>
@@ -434,9 +442,10 @@ export default function EasyTeleprompter() {
         <article className="card editor-card"><div className="card-heading"><div><span className="section-number">01</span><div><h2>Your Script</h2><p>Your draft saves automatically on this device.</p></div></div><span className="save-state"><i /> Saved locally</span></div><label className="field"><span>Script title</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Example: Drink Service Training" /></label><div className="script-toolbar"><button onClick={paste}><Icon symbol="▣">Paste</Icon></button><button onClick={() => fileInput.current?.click()}><Icon symbol="↑">Import .txt</Icon></button><button onClick={exportTxt}><Icon symbol="↓">Export .txt</Icon></button><i /><button onClick={save}><Icon symbol="◇">Save Script</Icon></button><button onClick={() => setLibrary(true)}><Icon symbol="▤">Load Saved</Icon></button><button className="danger-text" onClick={clear}><Icon symbol="×">Clear</Icon></button></div><input ref={fileInput} className="visually-hidden" type="file" accept=".txt,text/plain" onChange={importTxt} /><div className="marker-toolbar" role="toolbar" aria-label="Insert production marker"><span>Insert:</span>{MARKER_OPTIONS.map((marker) => <button key={marker} type="button" className={`marker-chip marker-${marker.toLowerCase().replace(" ", "-")}`} onClick={() => insertMarker(marker)} aria-label={`Insert ${marker.toLowerCase()} marker`}>{`[${marker}]`}</button>)}</div><textarea ref={scriptEditor} className="script-editor" value={content} onChange={(event) => setContent(event.target.value)} placeholder={`Paste or type your script here…\n\nTip: Add [PAUSE], [SMILE], [B-ROLL], [EMPHASIS], or [3 SEC] production markers.`} /><div className="editor-footer"><span><strong>{words}</strong> words</span><span><strong>{speakTime(words, settings.wpm)}</strong> at {settings.wpm} WPM</span><span className="marker-legend"><i>[PAUSE]</i><i>[SMILE]</i><i>[B-ROLL]</i></span></div></article>
         <aside><article className="card quick-card"><div className="card-heading"><div><span className="section-number">02</span><div><h2>Quick Setup</h2><p>Start with these essentials.</p></div></div></div><Range label="Scroll speed" value={settings.speed} min={speedBounds(settings.extremeSpeed).min} max={speedBounds(settings.extremeSpeed).max} step={settings.extremeSpeed ? .1 : .5} display={`${settings.speed.toFixed(1)} · ${pace(settings.speed)}`} onChange={(value) => setSettings((current) => ({ ...current, speed: value }))} /><Toggle label="Extreme speed range" hint="Unlocks very slow and super fast scrolling" checked={settings.extremeSpeed} onChange={(value) => setSettings((current) => toggleExtremeSpeed(current, value))} /><Range label="Speaking pace" value={settings.wpm} min={80} max={200} step={5} display={`${settings.wpm} WPM`} onChange={(value) => setSettings((current) => ({ ...current, wpm: value }))} /><Range label="Text size" value={settings.fontSize} min={28} max={120} step={2} display={`${settings.fontSize}px`} onChange={(value) => setSettings((current) => ({ ...current, fontSize: value }))} /><label className="select-field"><span>Countdown before scrolling</span><select value={settings.countdown} onChange={(event) => setSettings((current) => ({ ...current, countdown: Number(event.target.value) as 0 | 3 | 5 | 10 }))}><option value={0}>Off</option><option value={3}>3 seconds</option><option value={5}>5 seconds</option><option value={10}>10 seconds</option></select></label><button className="button primary start-button" onClick={start}><Icon symbol="▶">Start Teleprompter</Icon></button><p className="tap-hint">☝ Tap anywhere while reading to pause or resume.</p></article><article className="card preset-card"><h3>One-tap presets</h3><p>Choose a proven setup, then fine-tune it.</p><div className="preset-grid">{PRESETS.map((preset) => <button key={preset.id} className="preset-button" onClick={() => selectPreset(preset.id)}><strong>{preset.name}</strong><span>{preset.description}</span></button>)}</div></article><article className="card marker-card"><div><h3>Production markers</h3><button onClick={sample}>Try sample</button></div><p>Add these directly inside your script.</p><section><span><b>[PAUSE]</b> Brief stop</span><span><b>[3 SEC]</b> Timed stop</span><span><b>[SMILE]</b> Direction</span><span><b>[B-ROLL]</b> Visual cue</span><span><b>[EMPHASIS]</b> Highlight next sentence</span></section></article><article className="card recovery-card"><h3>Storage & Recovery</h3><p><strong>{storageUsage}</strong> in browser storage</p>{recentResults[0] && <p>Last practice: {recentResults[0].averageWpm} WPM · {formatDuration(recentResults[0].elapsedMs)}</p>}<div className="recovery-actions"><button onClick={clearPosition}>Clear Saved Position</button><button onClick={resetSettings}>Reset Settings</button></div></article></aside>
       </section>
-      <section className="privacy"><span>✓</span><div><strong>Your scripts stay on your device.</strong><p>No login, database, paid API, or cloud upload is required.</p></div><i>Android · iPhone · iPad · Mac · Windows</i></section>
+      <section className="privacy"><span>✓</span><div><strong>Your scripts stay on your device.</strong><p>No login is required. Signing in is optional and only used for your venue's team training records.</p></div><i>Android · iPhone · iPad · Mac · Windows</i></section>
     </main><footer><span>Easy Teleprompter v1.1</span><span>Built for clear, confident training videos.</span></footer>
     {tutorial && <Tutorial onClose={dismissTutorial} onSample={sample} />}{library && <Library scripts={scripts} onOpen={open} onDuplicate={duplicate} onRename={(item) => { setRename(item); setRenameValue(item.title); }} onDelete={deleteScript} onClose={() => setLibrary(false)} />}
+    {signInOpen && <SignInModal onClose={() => setSignInOpen(false)} notify={notify} />}{analyticsOpen && profile && <AnalyticsModal onClose={() => setAnalyticsOpen(false)} profile={profile} />}
     {rename && <Modal title="Rename Script" onClose={() => setRename(null)}><label className="field"><span>Script title</span><input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => event.key === "Enter" && renameScript()} /></label><div className="modal-actions"><button className="button secondary" onClick={() => setRename(null)}>Cancel</button><button className="button primary" onClick={renameScript}>Rename</button></div></Modal>}
     {confirm && <Modal title={confirm.title} onClose={() => setConfirm(null)}><p className="confirm-message">{confirm.message}</p><div className="modal-actions"><button className="button secondary" onClick={() => setConfirm(null)}>Cancel</button><button className={`button ${confirm.destructive ? "danger" : "primary"}`} onClick={() => { const action = confirmAction.current; setConfirm(null); action?.(); }}>{confirm.label}</button></div></Modal>}
     {installHelp && <Modal title="Install Easy Teleprompter" onClose={() => setInstallHelp(false)}><div className="install-help"><div><strong>iPhone / iPad</strong><p>Open in Safari, tap Share, then choose <b>Add to Home Screen</b>.</p></div><div><strong>Android / Chrome</strong><p>Open the browser menu and choose <b>Install app</b> or <b>Add to Home screen</b>.</p></div><div><strong>Mac / Windows</strong><p>Use the install icon in Chrome or Edge’s address bar or browser menu.</p></div></div><div className="modal-actions"><button className="button primary" onClick={() => setInstallHelp(false)}>Done</button></div></Modal>}

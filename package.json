@@ -11,9 +11,11 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "emulators": "firebase emulators:start --only auth,database"
   },
   "dependencies": {
+    "firebase": "^12.18.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
@@ -24,6 +26,7 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.0.2",
+    "firebase-tools": "^15.27.0",
     "jsdom": "^29.1.1",
     "typescript": "^5.9.3",
     "vite": "^8.0.13",
