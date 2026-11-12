@@ -70,12 +70,11 @@ Netlify provides the HTTPS required for PWA installation and service workers. On
 
 ## Deploy to GitHub Pages
 
-The workflow in `.github/workflows/deploy-pages.yml` tests, builds, and publishes `dist/`.
+The workflow in `.github/workflows/deploy-pages.yml` tests, builds, and publishes `dist/` on every push to `main` (or by hand from the **Actions** tab).
 
-1. In the repository, open **Settings → Pages** and set **Source** to **GitHub Actions**.
+1. In the repository, open **Settings → Pages** and set **Source** to **GitHub Actions** (one-time).
    GitHub Pages needs a public repository on the free plan (a paid plan is required to publish from a private one).
-2. Open the **Actions** tab, choose **Deploy to GitHub Pages**, and press **Run workflow**. The site appears at `https://<owner>.github.io/<repo-name>/`.
-3. To redeploy automatically on every push to `main`, add a `push:` trigger (see the comment at the top of the workflow).
+2. Push to `main`. The site appears at `https://<owner>.github.io/<repo-name>/`.
 
 The build reads `BASE_PATH` (set automatically from the repository name) so assets, the manifest, and the service worker all resolve under the `/<repo-name>/` sub-path. Without it the build targets a root host such as Netlify. GitHub Pages cannot send response headers, so production builds also embed the Content-Security-Policy as a `<meta>` tag.
 
