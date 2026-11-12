@@ -189,3 +189,75 @@ export function applyPreset(settings: Settings, presetId: Preset["id"]) {
   const preset = PRESETS.find((item) => item.id === presetId);
   return preset ? sanitizeSettings({ ...settings, ...preset.values }) : settings;
 }
+
+// ---- Presenter profiles: a named snapshot of the reading setup for one person ----
+
+export const PROFILE_FIELDS = ["speed", "extremeSpeed", "fontSize", "lineSpacing", "textWidth", "alignment", "countdown", "flipHorizontal", "flipVertical"] as const;
+export type ProfileSettings = Pick<Settings, (typeof PROFILE_FIELDS)[number]>;
+export type Profile = ProfileSettings & { id: string; name: string; updatedAt: number };
+
+export function profileFromSettings(id: string, name: string, settings: unknown, updatedAt = Date.now()): Profile {
+  const s = sanitizeSettings(settings);
+  return {
+    id,
+    name: name.trim().slice(0, 40) || "Presenter",
+    updatedAt,
+    speed: s.speed,
+    extremeSpeed: s.extremeSpeed,
+    fontSize: s.fontSize,
+    lineSpacing: s.lineSpacing,
+    textWidth: s.textWidth,
+    alignment: s.alignment,
+    countdown: s.countdown,
+    flipHorizontal: s.flipHorizontal,
+    flipVertical: s.flipVertical,
+  };
+}
+
+export function applyProfile(settings: Settings, profile: Profile): Settings {
+  return sanitizeSettings({
+    ...settings,
+    speed: profile.speed,
+    extremeSpeed: profile.extremeSpeed,
+    fontSize: profile.fontSize,
+    lineSpacing: profile.lineSpacing,
+    textWidth: profile.textWidth,
+    alignment: profile.alignment,
+    countdown: profile.countdown,
+    flipHorizontal: profile.flipHorizontal,
+    flipVertical: profile.flipVertical,
+  });
+}
+
+export function sanitizeProfiles(input: unknown): Profile[] {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set<string>();
+  const profiles: Profile[] = [];
+  for (const item of input) {
+    if (!item || typeof item !== "object") continue;
+    const value = item as Partial<Profile>;
+    if (typeof value.id !== "string" || !value.id || seen.has(value.id) || typeof value.name !== "string") continue;
+    seen.add(value.id);
+    profiles.push(profileFromSettings(value.id, value.name, value, Number.isFinite(value.updatedAt) ? Number(value.updatedAt) : 0));
+    if (profiles.length >= 50) break;
+  }
+  return profiles;
+}
+
+// ---- Run-time planning ----
+
+/** Speed value that scrolls `distancePx` in `seconds`, clamped to the full (extreme) range. */
+export function speedForDuration(distancePx: number, seconds: number) {
+  const pixelsPerSecond = Math.max(0, distancePx) / Math.max(1, seconds);
+  const bounds = speedBounds(true);
+  return Math.round(clamp((pixelsPerSecond - 10) / 7.5, bounds.min, bounds.max) * 10) / 10;
+}
+
+export function secondsForDistance(distancePx: number, speed: number) {
+  return Math.max(0, distancePx) / scrollPixelsPerSecond(speed);
+}
+
+export function formatClock(totalSeconds: number) {
+  const seconds = Math.max(0, Math.round(Number.isFinite(totalSeconds) ? totalSeconds : 0));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}

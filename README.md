@@ -25,6 +25,12 @@ If the prompt is paused, tap **Start / Resume**, tap the reading area, or press 
 - WPM-calibrated speed, speaking estimates, and post-practice results
 - One-tap presets for training, announcements, short reels, and prompter glass
 - In-app PWA update notification and stronger storage recovery
+- Tap-to-insert production markers, an extended speed range (0.2–60) with one-tap slowest/fastest jumps
+- **Presenter profiles**: save each person's speed, text size, alignment, countdown, and mirroring, then switch in one tap (home screen or mid-session)
+- **Run-time planning**: a live "time left" estimate (including `[PAUSE]`/`[3 SEC]` markers) and **Fit speed to length** to hit an exact duration
+- **Clicker and remote support**: Page Down / media play-pause toggle pause, Page Up steps back five seconds
+- **Backup and restore**: export scripts and profiles to one JSON file and merge them back on any device (nothing is deleted on restore)
+- Optional team sign-in and training-compliance reporting through Firebase (see below); hidden entirely unless configured
 
 ## Run locally
 
@@ -62,6 +68,24 @@ The production files are written to `dist/`. GitHub Actions also runs `npm test`
 
 Netlify provides the HTTPS required for PWA installation and service workers. On iPhone and iPad, install from Safari using **Share → Add to Home Screen**.
 
+## Deploy to GitHub Pages
+
+The workflow in `.github/workflows/deploy-pages.yml` tests, builds, and publishes `dist/`.
+
+1. In the repository, open **Settings → Pages** and set **Source** to **GitHub Actions**.
+   GitHub Pages needs a public repository on the free plan (a paid plan is required to publish from a private one).
+2. Open the **Actions** tab, choose **Deploy to GitHub Pages**, and press **Run workflow**. The site appears at `https://<owner>.github.io/<repo-name>/`.
+3. To redeploy automatically on every push to `main`, add a `push:` trigger (see the comment at the top of the workflow).
+
+The build reads `BASE_PATH` (set automatically from the repository name) so assets, the manifest, and the service worker all resolve under the `/<repo-name>/` sub-path. Without it the build targets a root host such as Netlify. GitHub Pages cannot send response headers, so production builds also embed the Content-Security-Policy as a `<meta>` tag.
+
+## Optional team sign-in (Firebase)
+
+Signing in is optional and adds team training reports; the app works identically without it. To enable it, create a Firebase project (Email/Password auth and Realtime Database), apply `database.rules.json`, and provide the values from `.env.example`:
+
+- Local development: copy `.env.example` to `.env.local` and fill it in.
+- GitHub Pages: add the same `VITE_FIREBASE_*` names as repository **variables** (Settings → Secrets and variables → Actions → Variables). Also add your `<owner>.github.io` domain under Firebase **Authentication → Settings → Authorized domains**.
+
 ## Browser fallbacks
 
 Automatic scrolling, local storage, markers, gestures, and keyboard controls work without special permissions. Clipboard reading, full screen, Wake Lock, install prompts, and speech recognition depend on the browser; the app shows an explanation or keeps the normal teleprompter available when a feature is unsupported.
@@ -70,7 +94,9 @@ Automatic scrolling, local storage, markers, gestures, and keyboard controls wor
 
 ```text
 easy-teleprompter/
-├── .github/workflows/ci.yml
+├── .github/workflows/
+│   ├── ci.yml
+│   └── deploy-pages.yml
 ├── public/
 │   ├── icon-192.png
 │   ├── icon-512.png
@@ -81,8 +107,10 @@ easy-teleprompter/
 ├── src/
 │   ├── EasyTeleprompter.tsx
 │   ├── app.css
-│   ├── core.ts
-│   ├── core.test.ts
+│   ├── backup.ts / backup.test.ts
+│   ├── core.ts / core.test.ts
+│   ├── firebase.ts, types.ts
+│   ├── auth/, components/, services/   (optional team sign-in and reports)
 │   └── main.tsx
 ├── CHANGELOG.md
 ├── index.html

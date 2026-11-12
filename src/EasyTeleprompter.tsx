@@ -15,24 +15,32 @@ import {
   DEFAULT_SETTINGS,
   PRESETS,
   applyPreset,
+  applyProfile,
   calculatePracticeResult,
   clamp,
   clampProgress,
+  formatClock,
   formatDuration,
+  profileFromSettings,
+  sanitizeProfiles,
   sanitizeSettings,
   scriptFingerprint,
   scrollPixelsPerSecond,
+  secondsForDistance,
   shouldOfferResume,
   speakingSeconds,
   speedBounds,
+  speedForDuration,
   speedStep,
   toggleExtremeSpeed,
   wordCount,
   type Alignment,
   type PracticeResult,
+  type Profile,
   type Settings,
   type Theme,
 } from "./core";
+import { buildBackup, mergeProfiles, mergeScripts, parseBackup } from "./backup";
 import { Modal } from "./components/Modal";
 import { SignInModal } from "./components/SignInModal";
 import { AnalyticsModal } from "./components/AnalyticsModal";
@@ -59,6 +67,7 @@ const STORE = {
   draft: "easy-teleprompter:draft:v1", settings: "easy-teleprompter:settings:v1",
   scripts: "easy-teleprompter:scripts:v1", tutorial: "easy-teleprompter:tutorial:v1",
   position: "easy-teleprompter:position:v1", results: "easy-teleprompter:practice-results:v1",
+  profiles: "easy-teleprompter:profiles:v1",
 };
 const SAMPLE_TITLE = "Welcoming Guests with Aloha";
 const SAMPLE = `Aloha and welcome to Hale ʻOhana.
@@ -143,7 +152,7 @@ function promptNodes(text: string, hide: boolean) {
   });
 }
 
-function Teleprompter({ title, script, settings, setSettings, initialProgress, onProgress, onFinish, onExit, notify }: { title: string; script: string; settings: Settings; setSettings: React.Dispatch<React.SetStateAction<Settings>>; initialProgress: number; onProgress(progress: number): void; onFinish(result: PracticeResult): void; onExit(): void; notify(message: string): void }) {
+function Teleprompter({ title, script, settings, setSettings, profiles, initialProgress, onProgress, onFinish, onExit, notify }: { title: string; script: string; settings: Settings; setSettings: React.Dispatch<React.SetStateAction<Settings>>; profiles: Profile[]; initialProgress: number; onProgress(progress: number): void; onFinish(result: PracticeResult): void; onExit(): void; notify(message: string): void }) {
   const surface = useRef<HTMLDivElement>(null), scroller = useRef<HTMLDivElement>(null), promptContent = useRef<HTMLDivElement>(null);
   const recognition = useRef<Recognition | null>(null), animation = useRef<number | null>(null);
   const wakeLock = useRef<{ release(): Promise<void> } | null>(null), lastFrame = useRef<number | null>(null);
@@ -157,11 +166,27 @@ function Teleprompter({ title, script, settings, setSettings, initialProgress, o
   const [markerPause, setMarkerPause] = useState<string | null>(null), [progress, setProgress] = useState(clampProgress(initialProgress));
   const [speechSupported, setSpeechSupported] = useState(false), [voice, setVoice] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [remaining, setRemaining] = useState<number | null>(null), [fitInput, setFitInput] = useState("60"), [profileId, setProfileId] = useState("");
   const set = useCallback(<K extends keyof Settings>(key: K, value: Settings[K]) => setSettings((current) => ({ ...current, [key]: value })), [setSettings]);
   const mirror = `${settings.flipHorizontal ? "scaleX(-1)" : ""} ${settings.flipVertical ? "scaleY(-1)" : ""}`.trim();
   const applyPosition = useCallback((position: number) => {
     if (promptContent.current) promptContent.current.style.transform = `translate3d(0, ${-position}px, 0) ${mirror}`;
   }, [mirror]);
+  // Seconds of [PAUSE] / [3 SEC] markers the reader has not reached yet.
+  const pauseSecondsLeft = useCallback(() => {
+    let total = 0;
+    promptContent.current?.querySelectorAll<HTMLElement>("[data-pause-seconds]").forEach((marker, index) => {
+      const seconds = Number(marker.dataset.pauseSeconds || 0);
+      if (seconds && !triggered.current.has(`${index}-${marker.dataset.markerName}`)) total += seconds;
+    });
+    return total;
+  }, []);
+  // Estimated time left at the current speed, including pauses still ahead.
+  const refreshTiming = useCallback(() => {
+    const box = scroller.current, text = promptContent.current; if (!box || !text) return;
+    const max = Math.max(1, text.scrollHeight - box.clientHeight);
+    setRemaining(Math.round(secondsForDistance(Math.max(0, max - scrollY.current), settings.speed) + pauseSecondsLeft()));
+  }, [settings.speed, pauseSecondsLeft]);
 
   const acquireLock = useCallback(async () => {
     const nav = navigator as Navigator & { wakeLock?: { request(kind: "screen"): Promise<{ release(): Promise<void> }> } };
@@ -170,7 +195,7 @@ function Teleprompter({ title, script, settings, setSettings, initialProgress, o
   }, []);
   const releaseLock = useCallback(async () => { try { await wakeLock.current?.release(); } catch { /* Already released. */ } wakeLock.current = null; }, []);
   const begin = useCallback(() => { setPlaying(false); if (settings.countdown) setCountdown(settings.countdown); else { setCountdown(null); setPlaying(true); } }, [settings.countdown]);
-  const restart = useCallback(() => { scrollY.current = 0; applyPosition(0); progressRef.current = 0; lastSavedProgress.current = 0; setProgress(0); speechChar.current = 0; sessionStarted.current = 0; pauseCount.current = 0; triggered.current.clear(); pauseUntil.current = 0; setMarkerPause(null); onProgress(0); begin(); }, [applyPosition, begin, onProgress]);
+  const restart = useCallback(() => { scrollY.current = 0; applyPosition(0); progressRef.current = 0; lastSavedProgress.current = 0; setProgress(0); speechChar.current = 0; sessionStarted.current = 0; pauseCount.current = 0; triggered.current.clear(); pauseUntil.current = 0; setMarkerPause(null); refreshTiming(); onProgress(0); begin(); }, [applyPosition, begin, onProgress, refreshTiming]);
 
   const beginRef = useRef(begin);
   beginRef.current = begin;
@@ -184,7 +209,14 @@ function Teleprompter({ title, script, settings, setSettings, initialProgress, o
   useEffect(() => { if (countdown === null) return; if (countdown <= 0) { setCountdown(null); setPlaying(true); return; } const timer = window.setTimeout(() => setCountdown((value) => value === null ? null : value - 1), 1000); return () => clearTimeout(timer); }, [countdown]);
   useEffect(() => { playingRef.current = playing; voiceRef.current = voice; if (playing && !sessionStarted.current) sessionStarted.current = Date.now(); playing ? acquireLock() : releaseLock(); }, [playing, voice, acquireLock, releaseLock]);
   useEffect(() => { const fn = () => document.visibilityState === "visible" && playingRef.current && acquireLock(); document.addEventListener("visibilitychange", fn); return () => document.removeEventListener("visibilitychange", fn); }, [acquireLock]);
-  useEffect(() => { const box = scroller.current, text = promptContent.current; if (!box || !text) return; const frame = requestAnimationFrame(() => { scrollY.current = progressRef.current * Math.max(1, text.scrollHeight - box.clientHeight); applyPosition(scrollY.current); }); return () => cancelAnimationFrame(frame); }, [settings.fontSize, settings.lineSpacing, settings.textWidth, settings.alignment, settings.flipHorizontal, settings.flipVertical, applyPosition]);
+  // Rotating a tablet or resizing the window re-wraps the text: keep the place in the script and the time estimate in step.
+  useEffect(() => {
+    const box = scroller.current, text = promptContent.current; if (!box || !text || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => { scrollY.current = progressRef.current * Math.max(1, text.scrollHeight - box.clientHeight); applyPosition(scrollY.current); refreshTiming(); });
+    observer.observe(box); observer.observe(text);
+    return () => observer.disconnect();
+  }, [applyPosition, refreshTiming]);
+  useEffect(() => { const box = scroller.current, text = promptContent.current; if (!box || !text) return; refreshTiming(); const frame = requestAnimationFrame(() => { scrollY.current = progressRef.current * Math.max(1, text.scrollHeight - box.clientHeight); applyPosition(scrollY.current); refreshTiming(); }); return () => cancelAnimationFrame(frame); }, [settings.fontSize, settings.lineSpacing, settings.textWidth, settings.alignment, settings.flipHorizontal, settings.flipVertical, script, applyPosition, refreshTiming]);
 
   useEffect(() => {
     const box = scroller.current, text = promptContent.current; if (!box || !text || !playing || voice) return;
@@ -207,7 +239,7 @@ function Teleprompter({ title, script, settings, setSettings, initialProgress, o
       applyPosition(scrollY.current);
       progressRef.current = Math.min(1, scrollY.current / max);
       if (time - lastUpdate > 180) {
-        setProgress(progressRef.current);
+        setProgress(progressRef.current); refreshTiming();
         if (Math.abs(progressRef.current - lastSavedProgress.current) >= 0.005) { onProgress(progressRef.current); lastSavedProgress.current = progressRef.current; }
         lastUpdate = time;
       }
@@ -220,7 +252,7 @@ function Teleprompter({ title, script, settings, setSettings, initialProgress, o
     };
     animation.current = requestAnimationFrame(loop);
     return () => { if (animation.current) cancelAnimationFrame(animation.current); animation.current = null; };
-  }, [playing, voice, settings.speed, script, onFinish, onProgress, applyPosition]);
+  }, [playing, voice, settings.speed, script, onFinish, onProgress, applyPosition, refreshTiming]);
 
   const startRecognition = useCallback(() => {
     const Constructor = window.SpeechRecognition ?? window.webkitSpeechRecognition; if (!Constructor) return;
@@ -253,7 +285,18 @@ function Teleprompter({ title, script, settings, setSettings, initialProgress, o
   const changeSpeed = useCallback((delta: number) => { const bounds = speedBounds(settings.extremeSpeed); set("speed", clamp(Math.round((settings.speed + delta) * 10) / 10, bounds.min, bounds.max)); }, [set, settings.speed, settings.extremeSpeed]);
   const jumpSpeed = useCallback((edge: "min" | "max") => { const bounds = speedBounds(settings.extremeSpeed); set("speed", edge === "min" ? bounds.min : bounds.max); }, [set, settings.extremeSpeed]);
   const changeText = useCallback((delta: number) => set("fontSize", Math.min(120, Math.max(28, settings.fontSize + delta))), [set, settings.fontSize]);
-  const seek = useCallback((seconds: number) => { const box = scroller.current, text = promptContent.current; if (!box || !text) return; const max = Math.max(1, text.scrollHeight - box.clientHeight); scrollY.current = Math.max(0, Math.min(max, scrollY.current + scrollPixelsPerSecond(settings.speed) * seconds)); applyPosition(scrollY.current); progressRef.current = scrollY.current / max; setProgress(progressRef.current); onProgress(progressRef.current); }, [settings.speed, onProgress, applyPosition]);
+  const seek = useCallback((seconds: number) => { const box = scroller.current, text = promptContent.current; if (!box || !text) return; const max = Math.max(1, text.scrollHeight - box.clientHeight); scrollY.current = Math.max(0, Math.min(max, scrollY.current + scrollPixelsPerSecond(settings.speed) * seconds)); applyPosition(scrollY.current); progressRef.current = scrollY.current / max; setProgress(progressRef.current); refreshTiming(); onProgress(progressRef.current); }, [settings.speed, onProgress, applyPosition, refreshTiming]);
+  // Picks the scroll speed that finishes the rest of the script in the requested number of seconds.
+  const fitToLength = useCallback(() => {
+    const box = scroller.current, text = promptContent.current; if (!box || !text) return;
+    const seconds = Number(fitInput);
+    if (!Number.isFinite(seconds) || seconds < 5 || seconds > 3600) return notify("Enter a length between 5 and 3600 seconds.");
+    const distance = Math.max(0, Math.max(1, text.scrollHeight - box.clientHeight) - scrollY.current), pauses = pauseSecondsLeft();
+    const speed = speedForDuration(distance, Math.max(1, seconds - pauses)), normal = speedBounds(false);
+    setSettings((current) => ({ ...current, speed, extremeSpeed: current.extremeSpeed || speed < normal.min || speed > normal.max }));
+    const actual = Math.round(secondsForDistance(distance, speed) + pauses);
+    notify(Math.abs(actual - seconds) <= 2 ? `Speed ${speed.toFixed(1)} finishes in about ${formatClock(actual)}.` : `Closest possible: speed ${speed.toFixed(1)} finishes in about ${formatClock(actual)}.`);
+  }, [fitInput, notify, pauseSecondsLeft, setSettings]);
   const fullscreen = useCallback(async () => {
     const element = surface.current as (HTMLDivElement & { webkitRequestFullscreen?: () => void }) | null;
     try { if (document.fullscreenElement) await document.exitFullscreen(); else if (element?.requestFullscreen) await element.requestFullscreen(); else if (element?.webkitRequestFullscreen) element.webkitRequestFullscreen(); else notify("Full screen is unavailable here. The teleprompter still works normally."); } catch { notify("Full screen could not start. Try your browser’s full-screen control."); }
@@ -262,9 +305,11 @@ function Teleprompter({ title, script, settings, setSettings, initialProgress, o
 
   useEffect(() => {
     const keys = (event: KeyboardEvent) => {
-      if ((event.target as HTMLElement)?.matches("input,select,textarea")) return;
+      if ((event.target as HTMLElement)?.matches?.("input,select,textarea")) return;
       const key = event.key.toLowerCase();
-      if (event.code === "Space" || key === " " || key === "spacebar") { event.preventDefault(); togglePlay(); }
+      // Space, plus the keys presentation clickers and Bluetooth remotes send: Page Down / media play-pause.
+      if (event.code === "Space" || key === " " || key === "spacebar" || key === "pagedown" || key === "mediaplaypause") { event.preventDefault(); togglePlay(); }
+      else if (key === "pageup") { event.preventDefault(); seek(-5); }
       else if (event.key === "ArrowUp") { event.preventDefault(); changeSpeed(speedStep(settings.extremeSpeed)); }
       else if (event.key === "ArrowDown") { event.preventDefault(); changeSpeed(-speedStep(settings.extremeSpeed)); }
       else if (event.key === "ArrowLeft") { event.preventDefault(); seek(-5); }
@@ -288,13 +333,14 @@ function Teleprompter({ title, script, settings, setSettings, initialProgress, o
     {countdown !== null && <div className="countdown"><span>Get ready</span><strong>{countdown || "Go"}</strong></div>}
     {markerPause && <div className="pause-toast">{markerPause}</div>}
     {!hidden ? <>
-      <header className="prompt-topbar"><button className="glass-button" onClick={exit}><Icon symbol="←">Exit</Icon></button><div className="prompt-title"><strong>{title || "Untitled Script"}</strong><span className={playing ? "playing" : ""}>{voice && playing ? "Listening" : playing ? "Scrolling" : countdown !== null ? "Countdown" : "Paused"}</span></div><div><button className="glass-button optional" onClick={restart}><Icon symbol="↻">Restart</Icon></button><button className="glass-button optional" onClick={fullscreen}><Icon symbol="⛶">Full Screen</Icon></button><button className="glass-button" onClick={() => setHidden(true)}><Icon symbol="◉">Hide</Icon></button></div></header>
+      <header className="prompt-topbar"><button className="glass-button" onClick={exit}><Icon symbol="←">Exit</Icon></button><div className="prompt-title"><strong>{title || "Untitled Script"}</strong><span className={playing ? "playing" : ""}>{voice && playing ? "Listening" : playing ? "Scrolling" : countdown !== null ? "Countdown" : "Paused"}</span>{remaining !== null && !voice && <span className="prompt-timer" title="Estimated time left at this speed, including pauses">{formatClock(remaining)} left</span>}</div><div><button className="glass-button optional" onClick={restart}><Icon symbol="↻">Restart</Icon></button><button className="glass-button optional" onClick={fullscreen}><Icon symbol="⛶">Full Screen</Icon></button><button className="glass-button" onClick={() => setHidden(true)}><Icon symbol="◉">Hide</Icon></button></div></header>
       <div className="control-dock"><div className="control-group"><button className="speed-jump" onClick={() => jumpSpeed("min")} aria-label="Jump to slowest speed">«</button><button onClick={() => changeSpeed(-speedStep(settings.extremeSpeed))} aria-label="Decrease scroll speed">−</button><span><small>Speed</small><strong>{settings.speed.toFixed(1)}</strong></span><button onClick={() => changeSpeed(speedStep(settings.extremeSpeed))} aria-label="Increase scroll speed">+</button><button className="speed-jump" onClick={() => jumpSpeed("max")} aria-label="Jump to fastest speed">»</button></div><button className="play-button" onClick={togglePlay} disabled={countdown !== null}><span>{playing ? "Ⅱ" : "▶"}</span>{playing ? "Pause" : "Start / Resume"}</button><div className="control-group size-control"><button onClick={() => changeText(-4)}>A−</button><span><small>Text</small><strong>{settings.fontSize}</strong></span><button onClick={() => changeText(4)}>A+</button></div><button className="glass-button settings-button" onClick={() => setSettingsOpen((value) => !value)}><Icon symbol="⚙">Settings</Icon></button></div>
       {settingsOpen && <section className="settings-sheet"><div className="settings-header"><div><span className="eyebrow">Reading controls</span><h2>Teleprompter Settings</h2></div><button className="icon-button" onClick={() => setSettingsOpen(false)}>×</button></div>
         <div className="settings-grid"><Range label="Scroll speed" value={settings.speed} min={speedBounds(settings.extremeSpeed).min} max={speedBounds(settings.extremeSpeed).max} step={settings.extremeSpeed ? .1 : .5} display={`${settings.speed.toFixed(1)} · ${pace(settings.speed)}`} onChange={(value) => set("speed", value)} /><Range label="Text size" value={settings.fontSize} min={28} max={120} step={2} display={`${settings.fontSize}px`} onChange={(value) => set("fontSize", value)} /><Range label="Line spacing" value={settings.lineSpacing} min={1.1} max={2.2} step={.05} display={settings.lineSpacing.toFixed(2)} onChange={(value) => set("lineSpacing", value)} /><Range label="Text width" value={settings.textWidth} min={45} max={98} display={`${settings.textWidth}%`} onChange={(value) => set("textWidth", value)} /><Range label="Top reading margin" value={settings.topMargin} min={0} max={35} display={`${settings.topMargin}%`} onChange={(value) => set("topMargin", value)} /><Range label="Bottom reading margin" value={settings.bottomMargin} min={0} max={35} display={`${settings.bottomMargin}%`} onChange={(value) => set("bottomMargin", value)} /></div>
-        <div className="settings-options"><label><span>Text alignment</span><select value={settings.alignment} onChange={(event) => set("alignment", event.target.value as Alignment)}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label><label><span>Countdown</span><select value={settings.countdown} onChange={(event) => set("countdown", Number(event.target.value) as 0 | 3 | 5 | 10)}><option value={0}>Off</option><option value={3}>3 seconds</option><option value={5}>5 seconds</option><option value={10}>10 seconds</option></select></label><div className="theme-control"><span>Display theme</span><div><button className={settings.theme === "dark" ? "active" : ""} onClick={() => setSettings((current) => ({ ...current, theme: "dark", backgroundColor: "#05070b", textColor: "#f8fafc" }))}>Dark</button><button className={settings.theme === "light" ? "active" : ""} onClick={() => setSettings((current) => ({ ...current, theme: "light", backgroundColor: "#ffffff", textColor: "#101828" }))}>Light</button><button className={settings.theme === "custom" ? "active" : ""} onClick={() => set("theme", "custom")}>Custom</button></div></div><div className="colors"><label><span>Background</span><input type="color" value={settings.backgroundColor} onChange={(event) => setSettings((current) => ({ ...current, theme: "custom", backgroundColor: event.target.value }))} /></label><label><span>Text</span><input type="color" value={settings.textColor} onChange={(event) => setSettings((current) => ({ ...current, theme: "custom", textColor: event.target.value }))} /></label></div></div>
+        <div className="fit-row"><label><span>Finish the script in</span><span className="fit-input"><input type="number" inputMode="numeric" min={5} max={3600} step={5} value={fitInput} onChange={(event) => setFitInput(event.target.value)} onKeyDown={(event) => event.key === "Enter" && fitToLength()} aria-label="Target length in seconds" /><em>sec</em></span></label><button className="button secondary" onClick={fitToLength}>Fit speed to length</button><p>{remaining !== null ? `At this speed: about ${formatClock(remaining)} left.` : "Set a length and the speed is chosen for you."}</p></div>
+        <div className="settings-options">{profiles.length > 0 && <label><span>Presenter profile</span><select value={profileId} onChange={(event) => { const next = profiles.find((item) => item.id === event.target.value); setProfileId(event.target.value); if (next) { setSettings((current) => applyProfile(current, next)); notify(`Loaded “${next.name}”.`); } }}><option value="">Current settings</option>{profiles.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}<label><span>Text alignment</span><select value={settings.alignment} onChange={(event) => set("alignment", event.target.value as Alignment)}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label><label><span>Countdown</span><select value={settings.countdown} onChange={(event) => set("countdown", Number(event.target.value) as 0 | 3 | 5 | 10)}><option value={0}>Off</option><option value={3}>3 seconds</option><option value={5}>5 seconds</option><option value={10}>10 seconds</option></select></label><div className="theme-control"><span>Display theme</span><div><button className={settings.theme === "dark" ? "active" : ""} onClick={() => setSettings((current) => ({ ...current, theme: "dark", backgroundColor: "#05070b", textColor: "#f8fafc" }))}>Dark</button><button className={settings.theme === "light" ? "active" : ""} onClick={() => setSettings((current) => ({ ...current, theme: "light", backgroundColor: "#ffffff", textColor: "#101828" }))}>Light</button><button className={settings.theme === "custom" ? "active" : ""} onClick={() => set("theme", "custom")}>Custom</button></div></div><div className="colors"><label><span>Background</span><input type="color" value={settings.backgroundColor} onChange={(event) => setSettings((current) => ({ ...current, theme: "custom", backgroundColor: event.target.value }))} /></label><label><span>Text</span><input type="color" value={settings.textColor} onChange={(event) => setSettings((current) => ({ ...current, theme: "custom", textColor: event.target.value }))} /></label></div></div>
         <div className="toggle-grid"><Toggle label="Extreme speed range" hint="Unlocks very slow and super fast scrolling" checked={settings.extremeSpeed} onChange={(value) => setSettings((current) => toggleExtremeSpeed(current, value))} /><Toggle label="Center reading guide" checked={settings.focusGuide} onChange={(value) => set("focusGuide", value)} /><Toggle label="Hide production markers" checked={settings.hideMarkers} onChange={(value) => set("hideMarkers", value)} /><Toggle label="Flip horizontally" hint="For teleprompter glass" checked={settings.flipHorizontal} onChange={(value) => set("flipHorizontal", value)} /><Toggle label="Flip vertically" checked={settings.flipVertical} onChange={(value) => set("flipVertical", value)} /><Toggle label="Follow My Voice" hint={speechSupported ? "Experimental · uses your browser microphone" : "Unsupported in this browser"} checked={voice} disabled={!speechSupported} onChange={toggleVoice} /></div>
-        {voiceError && <p className="inline-alert">{voiceError}</p>}<p className="shortcuts"><strong>Keyboard:</strong> Space pause · ↑/↓ speed · ←/→ five seconds · R restart · F full screen · Esc exit</p>
+        {voiceError && <p className="inline-alert">{voiceError}</p>}<p className="shortcuts"><strong>Keyboard:</strong> Space or clicker Page Down pause · ↑/↓ speed · ←/→ five seconds · Page Up back five seconds · R restart · F full screen · Esc exit</p>
       </section>}
     </> : <button className="show-controls glass-button" onClick={() => setHidden(false)}><Icon symbol="◉">Show controls</Icon></button>}
   </div>;
@@ -311,6 +357,8 @@ export default function EasyTeleprompter() {
   const [storageWarning, setStorageWarning] = useState<string | null>(null), [storageUsage, setStorageUsage] = useState<string>("Checking…");
   const [updateWorker, setUpdateWorker] = useState<ServiceWorker | null>(null);
   const [signInOpen, setSignInOpen] = useState(false), [analyticsOpen, setAnalyticsOpen] = useState(false);
+  const [profiles, setProfiles] = useState<Profile[]>([]), [activeProfileId, setActiveProfileId] = useState(""), [profileDialog, setProfileDialog] = useState(false), [profileName, setProfileName] = useState("");
+  const restoreInput = useRef<HTMLInputElement>(null);
   const { status: authStatus, profile, signOut } = useAuth();
   const confirmAction = useRef<(() => void) | null>(null), fileInput = useRef<HTMLInputElement>(null), scriptEditor = useRef<HTMLTextAreaElement>(null);
   const reloadingForUpdate = useRef(false);
@@ -346,11 +394,12 @@ export default function EasyTeleprompter() {
     setSettings(sanitizeSettings(read<Partial<Settings>>(STORE.settings, {})));
     const saved = read<Script[]>(STORE.scripts, []); setScripts(Array.isArray(saved) ? saved.filter((item) => item && typeof item.content === "string") : []);
     const results = read<PracticeResult[]>(STORE.results, []); setRecentResults(Array.isArray(results) ? results.slice(0, 10) : []);
+    setProfiles(sanitizeProfiles(read<unknown>(STORE.profiles, [])));
     if (recovered) setStorageWarning("Damaged saved settings were safely reset. Your app can continue normally.");
     setTutorial(localStorage.getItem(STORE.tutorial) !== "dismissed"); setReady(true);
     refreshStorage();
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/service-worker.js").then((registration) => {
+      navigator.serviceWorker.register(`${import.meta.env.BASE_URL}service-worker.js`).then((registration) => {
         const watch = (worker: ServiceWorker | null) => worker?.addEventListener("statechange", () => {
           if (worker.state === "installed" && navigator.serviceWorker.controller) setUpdateWorker(worker);
         });
@@ -367,6 +416,7 @@ export default function EasyTeleprompter() {
   }, [refreshStorage]);
   useEffect(() => { if (ready) safelySave(STORE.draft, { title, content, currentId }); }, [ready, title, content, currentId, safelySave]);
   useEffect(() => { if (ready) safelySave(STORE.settings, settings); }, [ready, settings, safelySave]);
+  useEffect(() => { if (ready) safelySave(STORE.profiles, profiles); }, [ready, profiles, safelySave]);
   useEffect(() => { if (ready) { safelySave(STORE.scripts, scripts); refreshStorage(); } }, [ready, scripts, safelySave, refreshStorage]);
 
   const words = useMemo(() => wordCount(content), [content]);
@@ -424,10 +474,40 @@ export default function EasyTeleprompter() {
   const resetSettings = () => ask({ title: "Reset all settings?", message: "Speed, text, colors, margins, and display options will return to their beginner-friendly defaults.", label: "Reset Settings" }, () => { setSettings(DEFAULT_SETTINGS); localStorage.removeItem(STORE.settings); notify("Settings reset."); });
   const clearPosition = () => { localStorage.removeItem(STORE.position); setResumePosition(null); notify("Saved reading position cleared."); };
   const selectPreset = (id: (typeof PRESETS)[number]["id"]) => { setSettings((current) => applyPreset(current, id)); notify("Reading preset applied."); };
+
+  // Presenter profiles: one named reading setup per person you shoot.
+  const chooseProfile = (id: string) => { setActiveProfileId(id); const next = profiles.find((item) => item.id === id); if (next) { setSettings((current) => applyProfile(current, next)); notify(`Loaded “${next.name}”.`); } };
+  const saveProfile = () => {
+    if (!profileName.trim()) return;
+    const item = profileFromSettings(makeId(), profileName, settings);
+    setProfiles((list) => [...list, item].sort((a, b) => a.name.localeCompare(b.name)));
+    setActiveProfileId(item.id); setProfileDialog(false); setProfileName(""); notify(`Saved profile “${item.name}”.`);
+  };
+  const updateProfile = () => { const current = profiles.find((item) => item.id === activeProfileId); if (!current) return; setProfiles((list) => list.map((item) => item.id === current.id ? profileFromSettings(item.id, item.name, settings) : item)); notify(`Updated “${current.name}” with your current settings.`); };
+  const deleteProfile = () => { const current = profiles.find((item) => item.id === activeProfileId); if (!current) return; ask({ title: `Delete “${current.name}”?`, message: "This removes the presenter profile from this device. Your scripts and current settings are not affected.", label: "Delete", destructive: true }, () => { setProfiles((list) => list.filter((item) => item.id !== current.id)); setActiveProfileId(""); notify("Profile deleted."); }); };
+
+  // Backup and restore: scripts and profiles only live in this browser, so make them portable.
+  const backupLibrary = () => {
+    if (!scripts.length && !profiles.length) return notify("Nothing to back up yet. Save a script first.");
+    const url = URL.createObjectURL(new Blob([JSON.stringify(buildBackup(scripts, profiles), null, 2)], { type: "application/json" })), link = document.createElement("a");
+    link.href = url; link.download = `easy-teleprompter-backup-${new Date().toISOString().slice(0, 10)}.json`; link.click(); URL.revokeObjectURL(url);
+    notify(`Backed up ${scripts.length} script${scripts.length === 1 ? "" : "s"} and ${profiles.length} profile${profiles.length === 1 ? "" : "s"}.`);
+  };
+  const restoreBackup = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
+    if (file.size > 5 * 1024 * 1024) return notify("That file is too large to be a backup.");
+    let text: string; try { text = await file.text(); } catch { return notify("That file could not be read."); }
+    const backup = parseBackup(text); if (!backup) return notify("That file isn't an Easy Teleprompter backup.");
+    const mergedScripts = mergeScripts(scripts, backup.scripts), mergedProfiles = mergeProfiles(profiles, backup.profiles);
+    ask({ title: "Restore this backup?", message: `Adds ${mergedScripts.added} new and updates ${mergedScripts.updated} existing script${mergedScripts.updated === 1 ? "" : "s"}, plus ${mergedProfiles.added + mergedProfiles.updated} presenter profile${mergedProfiles.added + mergedProfiles.updated === 1 ? "" : "s"}. Nothing on this device is deleted.`, label: "Restore" }, () => { setScripts(mergedScripts.items); setProfiles(mergedProfiles.items); notify("Backup restored."); });
+  };
   const applyUpdate = () => updateWorker?.postMessage({ type: "SKIP_WAITING" });
   const install = async () => { const event = installPrompt as (Event & { prompt?: () => Promise<void>; userChoice?: Promise<unknown> }) | null; if (event?.prompt) { await event.prompt(); await event.userChoice?.catch(() => undefined); setInstallPrompt(null); } else setInstallHelp(true); };
 
-  if (prompt) return <Teleprompter title={title} script={content} settings={settings} setSettings={setSettings} initialProgress={initialProgress} onProgress={handlePromptProgress} onFinish={handleFinish} onExit={() => setPrompt(false)} notify={notify} />;
+  if (prompt) return <>
+    <Teleprompter title={title} script={content} settings={settings} setSettings={setSettings} profiles={profiles} initialProgress={initialProgress} onProgress={handlePromptProgress} onFinish={handleFinish} onExit={() => setPrompt(false)} notify={notify} />
+    {toast && <div className="app-toast over-prompt" role="status"><span>✓</span>{toast}</div>}
+  </>;
   return <div className="app-shell">
     {updateWorker && <div className="update-banner" role="status"><span><strong>Easy Teleprompter has an update ready.</strong><small>Your script is already saved.</small></span><button className="button primary" onClick={applyUpdate}>Update Now</button><button className="icon-button" onClick={() => setUpdateWorker(null)} aria-label="Dismiss update">×</button></div>}
     <header className="site-header"><a href="#top" className="brand"><span className="brand-mark"><i /></span><span><strong>Easy Teleprompter</strong><small>Training video companion</small></span></a><nav><button className="header-button" onClick={() => setTutorial(true)}><Icon symbol="?">Quick Help</Icon></button><button className="header-button accent" onClick={install}><Icon symbol="↓">Install App</Icon></button>{(authStatus === "signed-in" || authStatus === "signed-out") && (authStatus === "signed-in" && profile ? <>
@@ -440,11 +520,12 @@ export default function EasyTeleprompter() {
       <section className="hero"><div><span className="eyebrow"><i /> Offline-ready · No account needed</span><h1>Easy Teleprompter</h1><p>Paste your script. Set your speed. Start speaking.</p></div><div className="hero-actions"><button className="button primary large" onClick={start}><Icon symbol="▶">Start Teleprompter</Icon></button><button className="button secondary" onClick={newScript}><Icon symbol="＋">New Script</Icon></button><button className="button secondary" onClick={() => setLibrary(true)}><Icon symbol="▤">Saved Scripts</Icon></button></div></section>
       <section className="editor-layout">
         <article className="card editor-card"><div className="card-heading"><div><span className="section-number">01</span><div><h2>Your Script</h2><p>Your draft saves automatically on this device.</p></div></div><span className="save-state"><i /> Saved locally</span></div><label className="field"><span>Script title</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Example: Drink Service Training" /></label><div className="script-toolbar"><button onClick={paste}><Icon symbol="▣">Paste</Icon></button><button onClick={() => fileInput.current?.click()}><Icon symbol="↑">Import .txt</Icon></button><button onClick={exportTxt}><Icon symbol="↓">Export .txt</Icon></button><i /><button onClick={save}><Icon symbol="◇">Save Script</Icon></button><button onClick={() => setLibrary(true)}><Icon symbol="▤">Load Saved</Icon></button><button className="danger-text" onClick={clear}><Icon symbol="×">Clear</Icon></button></div><input ref={fileInput} className="visually-hidden" type="file" accept=".txt,text/plain" onChange={importTxt} /><div className="marker-toolbar" role="toolbar" aria-label="Insert production marker"><span>Insert:</span>{MARKER_OPTIONS.map((marker) => <button key={marker} type="button" className={`marker-chip marker-${marker.toLowerCase().replace(" ", "-")}`} onClick={() => insertMarker(marker)} aria-label={`Insert ${marker.toLowerCase()} marker`}>{`[${marker}]`}</button>)}</div><textarea ref={scriptEditor} className="script-editor" value={content} onChange={(event) => setContent(event.target.value)} placeholder={`Paste or type your script here…\n\nTip: Add [PAUSE], [SMILE], [B-ROLL], [EMPHASIS], or [3 SEC] production markers.`} /><div className="editor-footer"><span><strong>{words}</strong> words</span><span><strong>{speakTime(words, settings.wpm)}</strong> at {settings.wpm} WPM</span><span className="marker-legend"><i>[PAUSE]</i><i>[SMILE]</i><i>[B-ROLL]</i></span></div></article>
-        <aside><article className="card quick-card"><div className="card-heading"><div><span className="section-number">02</span><div><h2>Quick Setup</h2><p>Start with these essentials.</p></div></div></div><Range label="Scroll speed" value={settings.speed} min={speedBounds(settings.extremeSpeed).min} max={speedBounds(settings.extremeSpeed).max} step={settings.extremeSpeed ? .1 : .5} display={`${settings.speed.toFixed(1)} · ${pace(settings.speed)}`} onChange={(value) => setSettings((current) => ({ ...current, speed: value }))} /><Toggle label="Extreme speed range" hint="Unlocks very slow and super fast scrolling" checked={settings.extremeSpeed} onChange={(value) => setSettings((current) => toggleExtremeSpeed(current, value))} /><Range label="Speaking pace" value={settings.wpm} min={80} max={200} step={5} display={`${settings.wpm} WPM`} onChange={(value) => setSettings((current) => ({ ...current, wpm: value }))} /><Range label="Text size" value={settings.fontSize} min={28} max={120} step={2} display={`${settings.fontSize}px`} onChange={(value) => setSettings((current) => ({ ...current, fontSize: value }))} /><label className="select-field"><span>Countdown before scrolling</span><select value={settings.countdown} onChange={(event) => setSettings((current) => ({ ...current, countdown: Number(event.target.value) as 0 | 3 | 5 | 10 }))}><option value={0}>Off</option><option value={3}>3 seconds</option><option value={5}>5 seconds</option><option value={10}>10 seconds</option></select></label><button className="button primary start-button" onClick={start}><Icon symbol="▶">Start Teleprompter</Icon></button><p className="tap-hint">☝ Tap anywhere while reading to pause or resume.</p></article><article className="card preset-card"><h3>One-tap presets</h3><p>Choose a proven setup, then fine-tune it.</p><div className="preset-grid">{PRESETS.map((preset) => <button key={preset.id} className="preset-button" onClick={() => selectPreset(preset.id)}><strong>{preset.name}</strong><span>{preset.description}</span></button>)}</div></article><article className="card marker-card"><div><h3>Production markers</h3><button onClick={sample}>Try sample</button></div><p>Add these directly inside your script.</p><section><span><b>[PAUSE]</b> Brief stop</span><span><b>[3 SEC]</b> Timed stop</span><span><b>[SMILE]</b> Direction</span><span><b>[B-ROLL]</b> Visual cue</span><span><b>[EMPHASIS]</b> Highlight next sentence</span></section></article><article className="card recovery-card"><h3>Storage & Recovery</h3><p><strong>{storageUsage}</strong> in browser storage</p>{recentResults[0] && <p>Last practice: {recentResults[0].averageWpm} WPM · {formatDuration(recentResults[0].elapsedMs)}</p>}<div className="recovery-actions"><button onClick={clearPosition}>Clear Saved Position</button><button onClick={resetSettings}>Reset Settings</button></div></article></aside>
+        <aside><article className="card quick-card"><div className="card-heading"><div><span className="section-number">02</span><div><h2>Quick Setup</h2><p>Start with these essentials.</p></div></div></div><Range label="Scroll speed" value={settings.speed} min={speedBounds(settings.extremeSpeed).min} max={speedBounds(settings.extremeSpeed).max} step={settings.extremeSpeed ? .1 : .5} display={`${settings.speed.toFixed(1)} · ${pace(settings.speed)}`} onChange={(value) => setSettings((current) => ({ ...current, speed: value }))} /><Toggle label="Extreme speed range" hint="Unlocks very slow and super fast scrolling" checked={settings.extremeSpeed} onChange={(value) => setSettings((current) => toggleExtremeSpeed(current, value))} /><Range label="Speaking pace" value={settings.wpm} min={80} max={200} step={5} display={`${settings.wpm} WPM`} onChange={(value) => setSettings((current) => ({ ...current, wpm: value }))} /><Range label="Text size" value={settings.fontSize} min={28} max={120} step={2} display={`${settings.fontSize}px`} onChange={(value) => setSettings((current) => ({ ...current, fontSize: value }))} /><label className="select-field"><span>Countdown before scrolling</span><select value={settings.countdown} onChange={(event) => setSettings((current) => ({ ...current, countdown: Number(event.target.value) as 0 | 3 | 5 | 10 }))}><option value={0}>Off</option><option value={3}>3 seconds</option><option value={5}>5 seconds</option><option value={10}>10 seconds</option></select></label><div className="profile-box"><label className="select-field"><span>Presenter profile</span><select value={activeProfileId} onChange={(event) => chooseProfile(event.target.value)}><option value="">Current settings</option>{profiles.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><div className="profile-actions"><button onClick={() => { setProfileName(""); setProfileDialog(true); }}>Save as new…</button><button onClick={updateProfile} disabled={!activeProfileId}>Update</button><button className="danger-text" onClick={deleteProfile} disabled={!activeProfileId}>Delete</button></div><p>Save each presenter's speed, text size and mirroring, then switch in one tap.</p></div><button className="button primary start-button" onClick={start}><Icon symbol="▶">Start Teleprompter</Icon></button><p className="tap-hint">☝ Tap anywhere while reading to pause or resume.</p></article><article className="card preset-card"><h3>One-tap presets</h3><p>Choose a proven setup, then fine-tune it.</p><div className="preset-grid">{PRESETS.map((preset) => <button key={preset.id} className="preset-button" onClick={() => selectPreset(preset.id)}><strong>{preset.name}</strong><span>{preset.description}</span></button>)}</div></article><article className="card marker-card"><div><h3>Production markers</h3><button onClick={sample}>Try sample</button></div><p>Add these directly inside your script.</p><section><span><b>[PAUSE]</b> Brief stop</span><span><b>[3 SEC]</b> Timed stop</span><span><b>[SMILE]</b> Direction</span><span><b>[B-ROLL]</b> Visual cue</span><span><b>[EMPHASIS]</b> Highlight next sentence</span></section></article><article className="card recovery-card"><h3>Storage & Recovery</h3><p><strong>{storageUsage}</strong> in browser storage</p>{recentResults[0] && <p>Last practice: {recentResults[0].averageWpm} WPM · {formatDuration(recentResults[0].elapsedMs)}</p>}<div className="recovery-actions"><button onClick={clearPosition}>Clear Saved Position</button><button onClick={resetSettings}>Reset Settings</button><button onClick={backupLibrary}>Back Up Library</button><button onClick={() => restoreInput.current?.click()}>Restore Backup</button></div><input ref={restoreInput} className="visually-hidden" type="file" accept=".json,application/json" onChange={restoreBackup} /><p className="backup-hint">Scripts live only in this browser. Back them up before clearing browser data or changing devices.</p></article></aside>
       </section>
       <section className="privacy"><span>✓</span><div><strong>Your scripts stay on your device.</strong><p>No login is required. Signing in is optional and only used for your venue's team training records.</p></div><i>Android · iPhone · iPad · Mac · Windows</i></section>
-    </main><footer><span>Easy Teleprompter v1.1</span><span>Built for clear, confident training videos.</span></footer>
+    </main><footer><span>Easy Teleprompter v1.2</span><span>Built for clear, confident training videos.</span></footer>
     {tutorial && <Tutorial onClose={dismissTutorial} onSample={sample} />}{library && <Library scripts={scripts} onOpen={open} onDuplicate={duplicate} onRename={(item) => { setRename(item); setRenameValue(item.title); }} onDelete={deleteScript} onClose={() => setLibrary(false)} />}
+    {profileDialog && <Modal title="Save Presenter Profile" onClose={() => setProfileDialog(false)}><label className="field"><span>Presenter name</span><input autoFocus maxLength={40} value={profileName} onChange={(event) => setProfileName(event.target.value)} onKeyDown={(event) => event.key === "Enter" && saveProfile()} placeholder="Example: Kai (fast reader)" /></label><p className="confirm-message">Saves scroll speed, text size, spacing, alignment, countdown and mirroring so you can load them for this person in one tap.</p><div className="modal-actions"><button className="button secondary" onClick={() => setProfileDialog(false)}>Cancel</button><button className="button primary" onClick={saveProfile} disabled={!profileName.trim()}>Save Profile</button></div></Modal>}
     {signInOpen && <SignInModal onClose={() => setSignInOpen(false)} notify={notify} />}{analyticsOpen && profile && <AnalyticsModal onClose={() => setAnalyticsOpen(false)} profile={profile} />}
     {rename && <Modal title="Rename Script" onClose={() => setRename(null)}><label className="field"><span>Script title</span><input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => event.key === "Enter" && renameScript()} /></label><div className="modal-actions"><button className="button secondary" onClick={() => setRename(null)}>Cancel</button><button className="button primary" onClick={renameScript}>Rename</button></div></Modal>}
     {confirm && <Modal title={confirm.title} onClose={() => setConfirm(null)}><p className="confirm-message">{confirm.message}</p><div className="modal-actions"><button className="button secondary" onClick={() => setConfirm(null)}>Cancel</button><button className={`button ${confirm.destructive ? "danger" : "primary"}`} onClick={() => { const action = confirmAction.current; setConfirm(null); action?.(); }}>{confirm.label}</button></div></Modal>}

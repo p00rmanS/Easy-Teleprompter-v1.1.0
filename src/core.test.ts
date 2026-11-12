@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_SETTINGS, applyPreset, calculatePracticeResult, formatDuration,
-  sanitizeSettings, scriptFingerprint, scrollPixelsPerSecond,
-  shouldOfferResume, speakingSeconds, speedBounds, speedStep, toggleExtremeSpeed,
+  DEFAULT_SETTINGS, applyPreset, applyProfile, calculatePracticeResult, formatClock, formatDuration,
+  profileFromSettings, sanitizeProfiles, sanitizeSettings, scriptFingerprint, scrollPixelsPerSecond,
+  secondsForDistance, shouldOfferResume, speakingSeconds, speedBounds, speedForDuration, speedStep,
+  toggleExtremeSpeed,
 } from "./core";
 
 describe("teleprompter core", () => {
@@ -68,5 +69,47 @@ describe("teleprompter core", () => {
 
   it("gives extreme mode a bigger per-tap step so fewer taps reach the extremes", () => {
     expect(speedStep(true)).toBeGreaterThan(speedStep(false));
+  });
+
+  it("captures and re-applies a presenter's reading setup without touching other settings", () => {
+    const kai = profileFromSettings("p1", "  Kai  ", { ...DEFAULT_SETTINGS, speed: 40, extremeSpeed: true, fontSize: 90, alignment: "center", flipHorizontal: true }, 7);
+    expect(kai).toMatchObject({ id: "p1", name: "Kai", speed: 40, extremeSpeed: true, fontSize: 90, alignment: "center", flipHorizontal: true, updatedAt: 7 });
+    const current = { ...DEFAULT_SETTINGS, theme: "light" as const, backgroundColor: "#ffffff", hideMarkers: true };
+    const applied = applyProfile(current, kai);
+    expect(applied).toMatchObject({ speed: 40, extremeSpeed: true, fontSize: 90, alignment: "center", flipHorizontal: true });
+    expect(applied).toMatchObject({ theme: "light", backgroundColor: "#ffffff", hideMarkers: true });
+  });
+
+  it("keeps a profile's speed inside the range its own extreme flag allows", () => {
+    expect(profileFromSettings("p", "Normal", { speed: 50, extremeSpeed: false }).speed).toBe(10);
+    expect(profileFromSettings("p", "", {}).name).toBe("Presenter");
+  });
+
+  it("sanitizes stored profiles: drops junk and duplicates, caps the list", () => {
+    const good = profileFromSettings("a", "Amy", DEFAULT_SETTINGS, 1);
+    expect(sanitizeProfiles("nope")).toEqual([]);
+    expect(sanitizeProfiles([good, good, null, { id: 5 }, { id: "x" }, { id: "b", name: "Bo", speed: 999 }]).map((item) => item.id)).toEqual(["a", "b"]);
+    const many = Array.from({ length: 80 }, (_, index) => ({ id: `id${index}`, name: "N" }));
+    expect(sanitizeProfiles(many)).toHaveLength(50);
+  });
+
+  it("plans run-time: the speed that fits a length actually scrolls the distance in that time", () => {
+    const distance = 3000;
+    const speed = speedForDuration(distance, 45);
+    expect(secondsForDistance(distance, speed)).toBeCloseTo(45, 0);
+    expect(speedForDuration(distance, 30)).toBeGreaterThan(speedForDuration(distance, 90));
+  });
+
+  it("clamps impossible run-time requests to the speed limits", () => {
+    expect(speedForDuration(100000, 1)).toBe(speedBounds(true).max);
+    expect(speedForDuration(10, 3600)).toBe(speedBounds(true).min);
+    expect(speedForDuration(0, 10)).toBe(speedBounds(true).min);
+  });
+
+  it("formats a countdown clock", () => {
+    expect(formatClock(0)).toBe("0:00");
+    expect(formatClock(65.4)).toBe("1:05");
+    expect(formatClock(-3)).toBe("0:00");
+    expect(formatClock(Number.NaN)).toBe("0:00");
   });
 });
